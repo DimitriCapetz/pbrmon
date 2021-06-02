@@ -17,7 +17,7 @@ RUN apt update && apt install -y sudo \
 
 RUN apt -y dist-upgrade
 
-ARG USERNAME=vscode
+ARG USERNAME=builder
 ARG USER_UID=1000
 ARG USER_GID=$USER_UID
 
@@ -33,8 +33,4 @@ RUN groupadd --gid $USER_GID $USERNAME \
 
 # Install Python Packages
 RUN pip install --upgrade pip
-RUN pip install dotbot docutils rcvpapi Pyyaml lxml jsonrpclib ansible cvprac pyeapi jsonschema treelib
-
-# Clone AVD and CVP Collections
-RUN git clone https://github.com/aristanetworks/ansible-avd.git collections/ansible-avd
-RUN git clone https://github.com/aristanetworks/ansible-cvp.git collections/ansible-cvp
+RUN pip install Pyyaml jsonrpclib pyeapi jsonschema treelib
