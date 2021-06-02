@@ -30,7 +30,7 @@
 
 	// Mount local .ssh directory for keys
 	"mounts": [ 
-		"source=${localEnv:HOME}/.ssh,target=/home/vscode/.ssh,type=bind,consistency=cached"
+		"source=${localEnv:HOME}/.ssh,target=/home/builder/.ssh,type=bind,consistency=cached"
 	],
 
 	// Comment out connect as root instead. More info: https://aka.ms/vscode-remote/containers/non-root.
