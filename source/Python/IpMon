@@ -1,0 +1,276 @@
+#!/usr/bin/python
+
+# Copyright (c) 2018, Arista Networks, Inc.
+# All rights reserved.
+#
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted provided that the following conditions are
+# met:
+#  - Redistributions of source code must retain the above copyright notice,
+# this list of conditions and the following disclaimer.
+#  - Redistributions in binary form must reproduce the above copyright
+# notice, this list of conditions and the following disclaimer in the
+# documentation and/or other materials provided with the distribution.
+#  - Neither the name of Arista Networks nor the names of its
+# contributors may be used to endorse or promote products derived from
+# this software without specific prior written permission.
+#
+# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+# "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+# LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+# A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL ARISTA NETWORKS
+# BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+# CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+# SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR
+# BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
+# WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE
+# OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN
+# IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+#
+#
+#    Written by:
+#       Rob Martin, Arista Networks
+#
+"""
+This EOS SDK script will monitor ICMP reachability to configured IPs 
+If certain amount of failures occur, it will trigger an email.
+"""
+
+import eossdk
+import syslog
+import sys
+import time
+from subprocess import call, PIPE, Popen
+
+__author__ = 'rmartin'
+__version__ = 1.4
+
+all_devices = []
+
+class deviceMON():
+    def __init__(self,d_name,d_ip):
+        self.device = d_name
+        self.ip = d_ip
+        self.first_fail = ''
+        self.first_success = ''
+        self.failed = 0
+        self.status_msg = ''
+    
+    def increase_failure(self):
+        print(self.failed)
+        self.failed += 1
+        print(self.failed)
+
+    def set_success(self):
+        self.first_success = time.ctime()
+    
+    def set_failure(self):
+        self.first_fail = time.ctime()
+    
+    def set_msg(self,msg):
+        self.status_msg = msg
+    
+    def del_msg(self):
+        self.status_msg = ''
+
+    def reset_failed(self):
+        self.failed = 0
+
+class IPMON(eossdk.AgentHandler,eossdk.TimeoutHandler):
+    def __init__(self,agentMgr):
+        eossdk.AgentHandler.__init__(self,agentMgr)
+        eossdk.TimeoutHandler.__init__(self,sdk.get_timeout_mgr())
+        self.tracer = eossdk.Tracer("EosSdkIPMonitor")
+        self.agentMgr_ = agentMgr
+        self.tracer.trace0("Constructed")
+        self.EMAIL = ''
+        self.PING_THRESHOLD = 3 #Default for failed ping attempts
+        self.POLL_TIME = 10 #Default for timeout between pings in seconds
+        self.vrf = 'default' #Default vrf if it has not been configured on the switch
+        self.intf = '' #Interface to source pings from
+        self.hostname = self._get_hostname()
+    
+    def on_initialized(self): 
+        self.tracer.trace0("We are initialized!")
+        self._to_syslog('IPMON Agent Initialized')
+        for r1 in self.agentMgr_.agent_option_iter():
+            self.opt_name = r1
+            self.opt_value = self.agentMgr_.agent_option(r1)
+            self.on_agent_option(self.opt_name,self.opt_value)
+        self.on_timeout()
+
+    def _get_hostname(self):
+        res_host = Popen(['hostname'],stdout=PIPE)
+        dev_hostname = res_host.stdout.read()
+        dev_hostname = dev_hostname.replace('\n','')
+        return(dev_hostname)
+
+    def _send_email(self,msg):
+        #Function to try and send an email alert if threshold has been reached
+        email_cmds = ['email',self.EMAIL,'-s%s'%msg]
+        try:
+            call(email_cmds,stdout=PIPE,stderr=PIPE)
+        except:
+            self._to_syslog("Error sending email!")
+
+    def _ping_host(self,host):
+        #Function to ping the IP address to locate
+        vrf_commands = ['sudo','ip','netns','exec']
+        base_commands = ['ping','-c1','-w1']
+        if self.intf:
+            base_commands = base_commands + ['-I%s'%self.intf]
+        base_commands = base_commands + [host]
+        if self.vrf != 'default':
+            vrf_commands.append(self.vrf)
+            ping_commands = vrf_commands + base_commands
+        else:
+            ping_commands = base_commands
+        try:
+            p_host = call(ping_commands,stdout=PIPE,stderr=PIPE)
+        except:
+            p_host = 6
+        return(p_host)
+
+    def _to_syslog(self,sys_msg):
+        syslog.syslog("%%myIP-6-LOG: %s"%sys_msg)
+    
+    def _remove_status(self,rem_device):
+        #Function to remove the old status and device from list
+        if all_devices:
+            for host in all_devices:
+                dev_index = all_devices.index(host)
+                if host.device == rem_device:
+                    self.agentMgr_.status_del(host.status_msg)
+                    try:
+                        all_devices.pop(dev_index)
+                    except:
+                        self._to_syslog('error removing from list')
+
+    def on_agent_option(self,optionName, value):
+        #First check to see if options will override the defaults
+        if optionName.lower() == 'email':
+            if value:
+                if self.EMAIL:
+                    self._to_syslog("Email address changed from %s to %s"%(self.EMAIL,value))
+                else:
+                    self._to_syslog("Email address changed from None to %s"%(value))
+                self.EMAIL = value
+            else:
+                self._to_syslog("Email address defaulted from %s to None"%self.EMAIL)
+                self.EMAIL = ''
+        elif optionName.lower() == 'threshold':
+            if value:
+                self._to_syslog("Ping Threshold value changed from %s to %s"%(self.PING_THRESHOLD,value))
+                self.PING_THRESHOLD = int(value)
+            else:
+                self._to_syslog("Ping Threshold value changed from %s to 3"%(self.PING_THRESHOLD))
+                self.PING_THRESHOLD = 3
+        elif optionName.lower() == 'poll':
+            if value:
+                self._to_syslog("Polling interval value changed from %s to %s"%(self.POLL_TIME,value))
+                self.POLL_TIME = int(value)
+            else:
+                self._to_syslog("Polling interval value changed from %s to 10"%(self.POLL_TIME))
+                self.POLL_TIME = 10
+        elif optionName.lower() == 'vrf':
+            if value:
+                if 'ns-' not in value:
+                    value = 'ns-' + value
+                self._to_syslog("VRF value changed from %s to %s"%(self.vrf,value))
+                self.vrf = value
+            else:
+                self._to_syslog("Polling interval value changed from %s to default"%(self.vrf))
+                self.vrf = 'default'
+        elif optionName.lower() == 'source':
+            if value:
+                self._to_syslog("Source Interface value changed from %s to %s"%(self.intf,value))
+                self.intf = value
+            else:
+                self._to_syslog("Source Interface value defaulted from %s to None"%(self.intf))
+                self.intf = ''
+        #Section to evaluate devices to be monitored
+        else:
+            new_device = True
+            #Section to remove a device from monitoring
+            if not value:
+                self._to_syslog('Remove %s'%optionName)
+                self._remove_status(optionName)
+            #Section to interate through and make sure it is a new device
+            if all_devices:
+                for r1 in all_devices:
+                    if optionName == r1.device and r1.ip != '':
+                        new_device = False
+                if new_device:
+                    all_devices.append(deviceMON(optionName,value))
+                else:
+                    for host in all_devices:
+                        if host.device == optionName:
+                            host.ip = value
+            #If all_devices list is empty, add the device into the list
+            else:
+                all_devices.append(deviceMON(optionName,value))
+
+    def on_timeout(self):
+        #Time to wait until it retries to ping defined hosts
+        #Checks to make sure there are configured devices
+        if all_devices:
+            for host in all_devices:
+                #Ping the remote device
+                if host.ip:
+                    ping_result = self._ping_host(host.ip)
+                    #If host is un-reachable
+                    if ping_result == 6:
+                        self._to_syslog("Error in trying to PING %s"%host.device)
+                    elif ping_result:
+                        old_count = host.failed
+                        host.increase_failure()
+                        #If first failure, grab the current date and time
+                        if old_count == 0:
+                            host.set_failure()
+                        #Delete out the current status msg, so the show daemon output doesn't fill up
+                        if host.status_msg:
+                            self.agentMgr_.status_del(host.status_msg)
+                            host.del_msg()
+                        #Set the daemon status output to when the device has been down since ie 1st fail
+                        host.set_msg("%s has been DOWN since:"%(host.device))
+                        self.agentMgr_.status_set(host.status_msg,host.first_fail)
+                        if host.failed < self.PING_THRESHOLD:
+                            self._to_syslog('%s on %s has Failed counter %s'%(host.device,host.ip,host.failed))
+                        else:
+                            self._to_syslog('%s on %s has Failed over %s times!'%(host.device,host.ip,self.PING_THRESHOLD))
+                    #Section if host is reachable via ping
+                    else:
+                        #If it's the first success, set date and time
+                        if not host.first_success:
+                            self._to_syslog('%s on %s is UP'%(host.device,host.ip))
+                            host.set_success()
+                        #If host previously failed, set new first success time and delete old status msg
+                        if host.failed > 0:
+                            self._to_syslog('%s on %s is UP'%(host.device,host.ip))
+                            host.set_success()
+                        if host.status_msg:
+                            self.agentMgr_.status_del(host.status_msg)
+                            host.del_msg()
+                        #reset the host failed count to 0
+                        host.reset_failed()
+                        #Only set the up since status msg if it was previously failed, updates only once
+                        if not host.status_msg:
+                            host.set_msg("%s has been up since:"%(host.device))
+                            self.agentMgr_.status_set(host.status_msg,host.first_success)
+                    #Check if the total failed count is eq to the set threshold
+                    if host.failed == self.PING_THRESHOLD:
+                        #Send email to email specified:
+                        if self.EMAIL:
+                            self._send_email('ALERT FROM %s: %s on %s has failed %s consecutive ping tests'%(self.hostname,host.device,host.ip,self.PING_THRESHOLD))
+                        else:
+                            self._to_syslog("Email is not configured to send alert")
+                        self._to_syslog('%s on %s has failed %s consecutive ping tests'%(host.device,host.ip,self.PING_THRESHOLD))
+        #Start the poller timeout via EOS SDK
+        self.timeout_time_is(eossdk.now() + self.POLL_TIME)
+
+
+if __name__ == '__main__':
+    syslog.openlog('myIP-MON',0,syslog.LOG_LOCAL4)
+    sdk = eossdk.Sdk()
+    _ = IPMON(sdk.get_agent_mgr())
+    sdk.main_loop(sys.argv)
