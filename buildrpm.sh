@@ -27,7 +27,7 @@ echo "primaryRPM: PbrMon-${VERSION}-${RELEASE}.noarch.rpm" >> manifest.txt
 echo -n "PbrMon-${VERSION}-${RELEASE}.noarch.rpm: " >> manifest.txt
 echo $(sha1sum rpmbuild/RPM/noarch/PbrMon-${VERSION}-${RELEASE}.noarch.rpm | awk '{print $1}') >> manifest.txt
 
-scp -i ~/.ssh/builder /workspaces/eos-html-intf/rpmbuild/RPM/noarch/PbrMon-${VERSION}-${RELEASE}.noarch.rpm builder@${DUT}:/mnt/flash/ext-eos/
+scp -i ~/.ssh/builder /workspaces/pbrmon/rpmbuild/RPM/noarch/PbrMon-${VERSION}-${RELEASE}.noarch.rpm builder@${DUT}:/mnt/flash/ext-eos/
 scp -i ~/.ssh/builder manifest.txt builder@${DUT}:/mnt/flash/ext-eos/
 
 ssh -i ~/.ssh/builder builder@${DUT} bash swix create /mnt/flash/ext-eos/swix/PbrMon-${VERSION}-${RELEASE}.swix /mnt/flash/ext-eos/PbrMon-${VERSION}-${RELEASE}.noarch.rpm
