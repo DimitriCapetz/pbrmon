@@ -5,9 +5,22 @@ run a config change to remove the failed host from a Nexthop-Group. On recovery 
 a change to put the recovered host back in the Nexthop-Group.
 
 ## Switch Setup
+
+### PBR Configuration
+
+Since this extension is built to specifically modify nexthop-group configuration, usually in reference to a PBR policy, it would be necessary to already have a nexthop-group configured on the switch. An example of this configuration is below.
+
+```
+nexthop-group PROXIES type ip
+   entry 0 nexthop 10.1.1.1
+   entry 1 nexthop 10.1.2.1
+   entry 2 nexthop 10.1.2.2
+   entry 3 nexthop 10.1.3.1
+```
+
 ### Install
 1. Copy `PbrMon-x.x.x-x.swix` to `/mnt/flash/` on the switch or to the `flash:` directory.
-2. Copy and install he `.swix` file to the extensions directory from within EOS.  Below command output shows the copy and install process for the extension.
+2. Copy and install the `.swix` file to the extensions directory from within EOS.  Below command output shows the copy and install process for the extension.
 ```
 copy flash:PbrMon-x.x.x-x.swix extension:
 extension PbrMon-x.x.x-x.swix
@@ -56,14 +69,14 @@ daemon PbrMon
 **PINGTIMEOUT** is the ICMP ping timeout in seconds. Default value is 2 seconds.
 
 
-2. Create a file in flash for reference. The NHG_BASE file is just a list of commands that define the steady-state entries of the Nexthop-Group. These commands must be FULL commands just as if you were configuration the switch from the CLI.
+2. Create a file in flash for reference. The NHG_BASE file is a list of commands that define the steady-state entries of the Nexthop-Group. These commands must be FULL commands just as if you were configuring the switch from the CLI.  It is important that this match the desired state and IPs of the nexthops if all hosts are online.
 
-For example the above referenced /mnt/flash/nhg.conf file could include the following commands:
+For example, the above referenced /mnt/flash/nhg.conf file would be comprised of the following commands:
 
 ```
 entry 0 nexthop 10.1.1.1
 entry 1 nexthop 10.1.2.1
-entry 1 nexthop 10.1.2.2
+entry 2 nexthop 10.1.2.2
 entry 3 nexthop 10.1.3.1
 ```
 #### Sample output of `show daemon PbrMon`
@@ -74,9 +87,9 @@ Configuration:
 Option              Value
 ------------------- ---------------------------------------
 CHECKINTERVAL       2
-HOLDDOWN            10
+HOLDDOWN            5
 HOLDUP              0
-IPv4                100.1.3.5,100.1.3.6,100.1.3.7,100.1.3.8
+IPv4                10.1.1.1,10.1.2.1,10.1.2.2,10.1.3.1
 NHG                 PROXIES
 NHG_BASE            /mnt/flash/nhg.conf
 PINGCOUNT           2
@@ -85,15 +98,15 @@ PINGTIMEOUT         2
 Status:
 Data                  Value
 --------------------- ---------------------------------------
-100.1.3.5:            UP
-100.1.3.6:            UP
-100.1.3.7:            DOWN
-100.1.3.8:            UP
+10.1.1.1:             UP
+10.1.2.1:             UP
+10.1.2.2:             DOWN
+10.1.3.1:             UP
 CHECKINTERVAL:        2
-HOLDDOWN:             10
+HOLDDOWN:             5
 HOLDUP:               0
 Health Status:        HOSTS DOWN
-IPv4 Ping List:       100.1.3.5,100.1.3.6,100.1.3.7,100.1.3.8
+IPv4 Ping List:       10.1.1.1,10.1.2.1,10.1.2.2,10.1.3.1
 NHG_BASE:             /mnt/flash/nhg.conf
 Nexthop-Group:        PROXIES
 PINGCOUNT:            2

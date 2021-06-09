@@ -472,6 +472,8 @@ class PbrMonAgent(eossdk.AgentHandler,eossdk.TimeoutHandler, eossdk.VrfHandler):
                         else:
                         	self.ITERATION += 1
                             # We need to wait till we hit our HOLDDOWN counter so we dampen a flapping condition if so exists
+            else:
+                self.agentMgr.status_set("Health Status:", "ALL HOSTS UP")
             if len(self.GOODIPV4) > 0:
             	# We have some valid hosts
                 # Determine, are we already up? If so, noop. If not, then we need to determine if we are at HOLDDOWN.
