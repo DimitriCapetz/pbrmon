@@ -227,7 +227,7 @@ class PbrMonAgent(eossdk.AgentHandler,eossdk.TimeoutHandler, eossdk.VrfHandler):
         #no shut on the daemon. Add some notes in comment and Readme.md to recommend
         #a shut and no shut every time you make parameter changes...
 
-        self.agentMgr.status_set("Health Status:", "Unknown")
+        self.agentMgr.status_set("Health Status:", "ALL HOSTS UP")
 
 
         #Start our handler now.
@@ -475,8 +475,8 @@ class PbrMonAgent(eossdk.AgentHandler,eossdk.TimeoutHandler, eossdk.VrfHandler):
                         else:
                         	self.ITERATION += 1
                             # We need to wait till we hit our HOLDDOWN counter so we dampen a flapping condition if so exists
-            else:
-            	# We get here when everything is up...nothing in DEADIPV4 list
+            if len(self.GOODIPV4) > 0:
+            	# We have some valid hosts
                 # Determine, are we already up? If so, noop. If not, then we need to determine if we are at HOLDDOWN.
                 for host in self.GOODIPV4:
                     if self.CURRENTSTATUS[host] == "BACK UP":
@@ -485,7 +485,7 @@ class PbrMonAgent(eossdk.AgentHandler,eossdk.TimeoutHandler, eossdk.VrfHandler):
                             syslog.syslog("PbrMon changing configuration for recovered host")
                             # run config change recover
                             self.change_config('RECOVER', host)
-                            #Set Currentstatus to 0, we're now in failed state
+                            #Set Currentstatus to UP after recovery
                             self.CURRENTSTATUS[host] = "UP"
                             #Reset ITERATION
                             self.ITERATION = 0
@@ -493,10 +493,10 @@ class PbrMonAgent(eossdk.AgentHandler,eossdk.TimeoutHandler, eossdk.VrfHandler):
                         	self.ITERATION += 1
 
             # Set current state via HealthStatus with agentMgr.
-            if "DOWN" in self.CURRENTSTATUS.values():
-                self.agentMgr.status_set("Health Status:", "FAIL")
-            else:
-                self.agentMgr.status_set("Health Status:", "GOOD")
+            for key, value in self.CURRENTSTATUS.iteritems():
+                self.agentMgr.status_set(key + ":", value)
+                if "DOWN" in value:
+                    self.agentMgr.status_set("Health Status:", "HOSTS DOWN")
 
         else:
             # If we failed the config check, then we land here and just skip any other processing
