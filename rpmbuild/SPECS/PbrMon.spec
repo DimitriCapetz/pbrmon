@@ -17,12 +17,12 @@ This EOS extenstion will monitor IPs and adjust PBR Nexthop Group Policies.
 %build
 
 %install
-mkdir -p $RPM_BUILD_ROOT/usr/bin
+mkdir -p $RPM_BUILD_ROOT/usr/local/bin
 mkdir -p $RPM_BUILD_ROOT/usr/lib/SysdbMountProfiles
-cp PbrMon $RPM_BUILD_ROOT/usr/bin/
+cp PbrMon $RPM_BUILD_ROOT/usr/local/bin/
 cp PbrMon.mp $RPM_BUILD_ROOT/usr/lib/SysdbMountProfiles/PbrMon
 
 %files
 %defattr(-,root,root,-)
 /usr/lib/SysdbMountProfiles/PbrMon
-%attr(0755,root,root) /usr/bin/PbrMon
+%attr(0755,root,root) /usr/local/bin/PbrMon
