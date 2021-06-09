@@ -30,11 +30,11 @@
 PbrMon Utility
 
 The purpose of this utility is to test ICMP ping reachability, alert if its down and
-run a config change. On recovery run another list of config changes.
+run a config change to remove the failed host from a Nexthop-Group. On recovery run 
+a change to put the recovered host back in the Nexthop-Group.
 
 Add the following configuration snippets to change the default behavior.
-Current version supports a list of hosts. The host checking is a logical OR, so
-only one host needs to respond. This is designed to reduce false positives.
+Current version supports a list of hosts.
 
 daemon PbrMon
    exec /usr/local/bin/PbrMon
@@ -68,17 +68,14 @@ Config Option explanation:
     - PINGTIMEOUT is the ICMP ping timeout in seconds. Default value is 2 seconds.
 
 
-The NHG_BASE file is just a list of commands that define the steady-state of the Nexthop-Group. These commands
+The NHG_BASE file is just a list of commands that define the steady-state entries of the Nexthop-Group. These commands
 must be FULL commands just as if you were configuration the switch from the CLI.
 
 For example the above referenced /mnt/flash/nhg.conf file could include the following commands:
 entry 0 nexthop 10.1.1.1
 entry 1 nexthop 10.1.2.1
-
-This is of course just an example, and your use case would determine what config changes you'd make.
-
-Please note, because this extension uses the EOS SDK eAPI interation module, you do not need to have 'enable and 'configure'
-in your config change files. This is because, the EOS SDK eAPI interation module is already in configuration mode.
+entry 1 nexthop 10.1.2.2
+entry 3 nexthop 10.1.3.1
 '''
 #************************************************************************************
 # Change log

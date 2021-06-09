@@ -1,92 +1,100 @@
 # EOS SDK PBR Monitor Agent
 
-The purpose of this SDK Agent is to monitor the reachability of an IP address and if it fails to respond, remove it from the Nexthop Group configuration of a PBR Policy. Once failed, it will continue to monitor the IP.  If it begins to respond again, it will re-add the IP to the Nexthop Group.
+The purpose of this utility is to test ICMP ping reachability, alert if its down and
+run a config change to remove the failed host from a Nexthop-Group. On recovery run 
+a change to put the recovered host back in the Nexthop-Group.
 
 ## Switch Setup
 ### Install
 1. Copy `PbrMon-x.x.x-x.swix` to `/mnt/flash/` on the switch or to the `flash:` directory.
 2. Copy and install he `.swix` file to the extensions directory from within EOS.  Below command output shows the copy and install process for the extension.
 ```
-Fill in show daemon output later
+copy flash:PbrMon-x.x.x-x.swix extension:
+extension PbrMon-x.x.x-x.swix
 ```
 3. In order for the extension to be installed on-boot, enter the following command:
 ```
-copy extensions: boot-extensions
+copy installed-extensions boot-extensions
 ```
 
 ### IP Monitor Agent Configuration
 1. In EOS config mode perform the following commands for basic functionality (see step #4 for further customization):
 ```
-config
-   daemon PbrMon
-      exec /usr/bin/PbrMon
-      no shutdown
-```
-2. By default, the agent has the following default values in terms of polling:
-- Polling interval = 5 seconds
-- Trigger threshold = 2 consecutive failed attempts
-- VRF = default (VRF used on the switch by default)
-- Source Interface = Egress Interface of Ping
-
-To modify the default behavior, use the following commands to override the defaults:
-```
-config
-   daemon PbrMon
-      option poll value {time_in_seconds}
-      option threshold value {number_of_failures}
-      option vrf value {vrf_name}
-      option source value {source_intf}
-```
-**`time_in_seconds` **(optional)** how much time the agent should wait until it tries to poll the IP addresses*
-
-***`number_of_failures` **(optional)** how many failures should occur consecutively before an action is triggered*
-
-*****`vrf_name` **(optional)** the name of the VRF that the pings should originate from (VRF name is case-sensitive)*
-
-******`source_intf` **(optional)** interface to source ping from. ie `et44, et49_1, ma1, vlan100` See conversion list below for interface mappings*
-
-##### Interface Mappings
-- et44 --> Ethernet44
-- et49_1 --> Ethernet49/1
-- ma1 --> Management1
-- vlan100 --> Vlan100
-
-3. In order for this agent to monitor IP addresses, the following commands will need to be taken:
-```
-config
-   daemon PbrMon
-      option {device_name} value {ip_of_device}
-```
-**`device_name` needs to be a unique identifier for each remote host*
-
-**`ip_of_device` needs to be a valid IPv4 address for the remote device for monitoring*
-
-***To see what unique peer identifiers have been created, enter `show daemon PbrMon`*
-
-4. Finally, the name of the Nexthop Group that will be modified in the event of a trigger needs to be added with the following commands:
-```
-config
-   daemon PbrMon
-      option nhg value {nhg_name}
-```
-**`nhg_name` The name of the nexthop-group in the config that will be modified*
-
-Example of a full `daemon PbrMon` config would look like with all parameters specified
-```
 daemon PbrMon
-   option proxy-01 value 192.168.50.16
-   option proxy-02 value 192.168.50.17
-   option nhg value PROXIES
-   option poll value 15
-   option threshold value 5
-   option vrf value INTERNET
-   option source value vlan100
+   exec /usr/local/bin/PbrMon
+   option CHECKINTERVAL value 5
+   option NHG_BASE value /mnt/flash/nhg.conf
+   option PINGCOUNT value 2
+   option PINGTIMEOUT value 2
+   option HOLDDOWN value 0
+   option HOLDUP value 0
+   option VRF value mgmt
+   option IPv4 value 10.1.1.1,10.1.2.1
+   option NHG value PROXIES
+   option SOURCE value et1
    no shutdown
 ```
 
+Config Option explanation:
+    - CHECKINTERVAL is the time in seconds to check hosts. Default is 5 seconds.
+    - IPv4 is the address(s) to check. Mandatory parameter. Multiple addresses are comma separated
+    - NHG is the name of the Nexthop-Group for the PBR Policy.
+    - NHG_BASE is the base config file for the Nexthop-Group when all hosts are up. Mandatory parameter.
+    - PINGCOUNT is the number of ICMP Ping Request messages to send. Default is 2.
+    - HOLDDOWN is the number of iterations to wait before declaring all hosts up. Default is 0
+      which means take immediate action.
+    - HOLDUP is the number of iterations to wait before declaring all hosts down. Default is 0
+      which means take immediate action.
+    - VRF is the VRF name to use to generate the ICMP pings. If the default is used, then just leave
+      blank and it will use the default VRF.
+    - SOURCE is the source interface (as instantiated to the kernel) to generate the pings fromself.
+      This is optional. Default is to use RIB/FIB route to determine which interface to use as sourceself.
+    - PINGTIMEOUT is the ICMP ping timeout in seconds. Default value is 2 seconds.
+
+
+2. Create a file in flash for reference. The NHG_BASE file is just a list of commands that define the steady-state entries of the Nexthop-Group. These commands must be FULL commands just as if you were configuration the switch from the CLI.
+
+For example the above referenced /mnt/flash/nhg.conf file could include the following commands:
+
+```
+entry 0 nexthop 10.1.1.1
+entry 1 nexthop 10.1.2.1
+entry 1 nexthop 10.1.2.2
+entry 3 nexthop 10.1.3.1
+```
 #### Sample output of `show daemon PbrMon`
 ```
-Fill in show output later
+Agent: PbrMon (running with PID 4500)
+Uptime: 0:19:16 (Start time: Wed Jun 09 13:53:33 2021)
+Configuration:
+Option              Value
+------------------- ---------------------------------------
+CHECKINTERVAL       2
+HOLDDOWN            10
+HOLDUP              0
+IPv4                100.1.3.5,100.1.3.6,100.1.3.7,100.1.3.8
+NHG                 PROXIES
+NHG_BASE            /mnt/flash/nhg.conf
+PINGCOUNT           2
+PINGTIMEOUT         2
+
+Status:
+Data                  Value
+--------------------- ---------------------------------------
+100.1.3.5:            UP
+100.1.3.6:            UP
+100.1.3.7:            DOWN
+100.1.3.8:            UP
+CHECKINTERVAL:        2
+HOLDDOWN:             10
+HOLDUP:               0
+Health Status:        HOSTS DOWN
+IPv4 Ping List:       100.1.3.5,100.1.3.6,100.1.3.7,100.1.3.8
+NHG_BASE:             /mnt/flash/nhg.conf
+Nexthop-Group:        PROXIES
+PINGCOUNT:            2
+PINGTIMEOUT:          2
+Status:               Administratively Up
 ```
 
 #### Signs of an Error
