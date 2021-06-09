@@ -36,14 +36,23 @@ daemon PbrMon
 ```
 
 **CHECKINTERVAL** is the time in seconds to check hosts. Default is 5 seconds.
+
 **IPv4** is the address(s) to check. Mandatory parameter. Multiple addresses are comma separated
+
 **NHG** is the name of the Nexthop-Group for the PBR Policy.
+
 **NHG_BASE** is the base config file for the Nexthop-Group when all hosts are up. Mandatory parameter.
+
 **PINGCOUNT** is the number of ICMP Ping Request messages to send. Default is 2.
+
 **HOLDDOWN** is the number of iterations to wait before declaring all hosts up. Default is 0 which means take immediate action.
+
 **HOLDUP** is the number of iterations to wait before declaring all hosts down. Default is 0 which means take immediate action.
+
 **VRF** is the VRF name to use to generate the ICMP pings. If the default is used, then just leave blank and it will use the default VRF.
+
 **SOURCE** is the source interface (as instantiated to the kernel) to generate the pings fromself. This is optional. Default is to use RIB/FIB route to determine which interface to use as sourceself.
+
 **PINGTIMEOUT** is the ICMP ping timeout in seconds. Default value is 2 seconds.
 
 
