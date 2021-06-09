@@ -1,7 +1,6 @@
-#!/usr/bin/python
-
-# Copyright (c) 2018, Arista Networks, Inc.
-# All rights reserved.
+#!/usr/bin/env python
+# Copyright (c) 2018 Arista Networks, Inc.  All rights reserved.
+# Arista Networks, Inc. Confidential and Proprietary.
 #
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions are
@@ -27,119 +26,593 @@
 # OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN
 # IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #
-#
-#    Written by:
-#       Rob Martin, Arista Networks
-#
-"""
-This EOS SDK script will monitor ICMP reachability to configured IPs 
-If certain amount of failures occur, it will trigger removal from a nexthop group.
-"""
+'''
+PbrMon Utility
 
-import eossdk
-import simplejson
-import syslog
+The purpose of this utility is to test ICMP ping reachability, alert if its down and
+run a config change. On recovery run another list of config changes.
+
+Add the following configuration snippets to change the default behavior.
+Current version supports a list of hosts. The host checking is a logical OR, so
+only one host needs to respond. This is designed to reduce false positives.
+
+daemon PbrMon
+   exec /usr/local/bin/PbrMon
+   option CHECKINTERVAL value 5
+   option NHG_BASE value /mnt/flash/nhg.conf
+   option PINGCOUNT value 2
+   option PINGTIMEOUT value 2
+   option HOLDDOWN value 0
+   option HOLDUP value 0
+   option VRF value mgmt
+   option IPv4 value 10.1.1.1,10.1.2.1
+   option NHG value PROXIES
+   option SOURCE value et1
+   no shutdown
+
+
+Config Option explanation:
+    - CHECKINTERVAL is the time in seconds to check hosts. Default is 5 seconds.
+    - IPv4 is the address(s) to check. Mandatory parameter. Multiple addresses are comma separated
+    - NHG is the name of the Nexthop-Group for the PBR Policy.
+    - NHG_BASE is the base config file for the Nexthop-Group when all hosts are up. Mandatory parameter.
+    - PINGCOUNT is the number of ICMP Ping Request messages to send. Default is 2.
+    - HOLDDOWN is the number of iterations to wait before declaring all hosts up. Default is 0
+      which means take immediate action.
+    - HOLDUP is the number of iterations to wait before declaring all hosts down. Default is 0
+      which means take immediate action.
+    - VRF is the VRF name to use to generate the ICMP pings. If the default is used, then just leave
+      blank and it will use the default VRF.
+    - SOURCE is the source interface (as instantiated to the kernel) to generate the pings fromself.
+      This is optional. Default is to use RIB/FIB route to determine which interface to use as sourceself.
+    - PINGTIMEOUT is the ICMP ping timeout in seconds. Default value is 2 seconds.
+
+
+The NHG_BASE file is just a list of commands that define the steady-state of the Nexthop-Group. These commands
+must be FULL commands just as if you were configuration the switch from the CLI.
+
+For example the above referenced /mnt/flash/nhg.conf file could include the following commands:
+nexthop-group PROXIES type ip
+entry 0 nexthop 10.1.1.1
+entry 1 nexthop 10.1.2.1
+
+This is of course just an example, and your use case would determine what config changes you'd make.
+
+Please note, because this extension uses the EOS SDK eAPI interation module, you do not need to have 'enable and 'configure'
+in your config change files. This is because, the EOS SDK eAPI interation module is already in configuration mode.
+'''
+#************************************************************************************
+# Change log
+# ----------
+# Version 1.0.0  - 11/2/2018 - Jeremy Georges -- jgeorges@arista.com --  Initial Version
+# Version 1.2.0  - 11/9/2018 - J. Georges - Changed Source IP lookup to eAPI module. Using the socket call
+#                                           when the interface was shut down caused a core dump.
+#                                           Pinging now executed through eAPI module also. This removes the need
+#                                           for subprocess module.
+#                                           Added ping timeout option.
+# Version 1.3.1 - 11/13.2018 - Merge branch changes. Change syslog to Local4 so log messages show up in EOS log
+# Version 1.4.0 - 12/06/2018 - Fixed bug with startTime variable checking which could
+#                              lead to a core dump if no fail/recover files were found.
+#                              Added vrf support.
+# Version 1.4.1 - 06/17/2020 - Fix timeout parameter for Ping command.
+# Version 1.4.2 - 04/22/2021 - Added verbose error logging for applyconfig
+#
+# Version 1.5.0 - 06/09/2021 - Forked for use in PBR Policy Adjustment
+#*************************************************************************************
+#
+#
+
+#****************************
+#*     MODULES              *
+#****************************
+#
 import sys
-import time
-from subprocess import call, PIPE, Popen
+import syslog
+import eossdk
+import os.path
+import os
+import simplejson
+import re
+import subprocess as sp
+import socket
 
-__author__ = 'rmartin, dcapetz'
-__version__ = 1.4
 
-all_devices = []
+__author__ = 'Jeremy Georges, Dimitri Capetz'
+__version__ = '1.5.0'
 
-class deviceMON():
-    def __init__(self,d_name,d_ip):
-        self.device = d_name
-        self.ip = d_ip
-        self.first_fail = ''
-        self.first_success = ''
-        self.failed = 0
-        self.status_msg = ''
-    
-    def increase_failure(self):
-        print(self.failed)
-        self.failed += 1
-        print(self.failed)
+#***************************
+#*     CLASSES             *
+#***************************
 
-    def set_success(self):
-        self.first_success = time.ctime()
-    
-    def set_failure(self):
-        self.first_fail = time.ctime()
-    
-    def set_msg(self,msg):
-        self.status_msg = msg
-    
-    def del_msg(self):
-        self.status_msg = ''
-
-    def reset_failed(self):
-        self.failed = 0
-
-class PBRMON(eossdk.AgentHandler,eossdk.TimeoutHandler):
-    def __init__(self,agentMgr,EapiMgr):
-        eossdk.AgentHandler.__init__(self,agentMgr)
-        eossdk.TimeoutHandler.__init__(self,sdk.get_timeout_mgr())
-        self.tracer = eossdk.Tracer("EosSdkPbrMonitor")
-        self.agentMgr_ = agentMgr
-        self.tracer.trace0("Constructed")
+class PbrMonAgent(eossdk.AgentHandler,eossdk.TimeoutHandler, eossdk.VrfHandler):
+    def __init__(self, sdk, timeoutMgr,VrfMgr,EapiMgr):
+        self.agentMgr = sdk.get_agent_mgr()
+        self.tracer = eossdk.Tracer("PbrMonPythonAgent")
+        eossdk.AgentHandler.__init__(self, self.agentMgr)
+        #Setup timeout handler
+        eossdk.TimeoutHandler.__init__(self, timeoutMgr)
+        self.tracer.trace0("Python agent constructed")
+        eossdk.VrfHandler.__init__(self, VrfMgr)
+        self.VrfMgr = VrfMgr
         self.EapiMgr = EapiMgr
-        self.PING_THRESHOLD = 3 #Default for failed ping attempts
-        self.POLL_TIME = 10 #Default for timeout between pings in seconds
-        self.vrf = 'default' #Default vrf if it has not been configured on the switch
-        self.nhg = 'PROXIES' #Default NHG Name
-        self.intf = '' #Interface to source pings from
-        self.hostname = self._get_hostname()
 
-    
-    def on_initialized(self): 
-        self.tracer.trace0("We are initialized!")
-        self._to_syslog('PBRMON Agent Initialized')
-        for r1 in self.agentMgr_.agent_option_iter():
-            self.opt_name = r1
-            self.opt_value = self.agentMgr_.agent_option(r1)
-            self.on_agent_option(self.opt_name,self.opt_value)
-        self.on_timeout()
+        # These are the defaults. The config can override these
+        # Make them an instance created under __init__ .
+        # Its a lot cleaner than creating global variables.
+        self.SOURCEINTFADDR = None
 
-    def _get_hostname(self):
-        res_host = Popen(['hostname'],stdout=PIPE)
-        dev_hostname = res_host.stdout.read()
-        dev_hostname = dev_hostname.replace('\n','')
-        return(dev_hostname)
+        # Default number of ICMP pings to send to each host.
+        self.PINGCOUNT = 2
 
-    def _ping_host(self,host):
-        #Function to ping the IP address to locate
-        vrf_commands = ['sudo','ip','netns','exec']
-        base_commands = ['ping','-c1','-w1']
-        if self.intf:
-            base_commands = base_commands + ['-I%s'%self.intf]
-        base_commands = base_commands + [host]
-        if self.vrf != 'default':
-            vrf_commands.append(self.vrf)
-            ping_commands = vrf_commands + base_commands
+        # Default Ping timeout
+        self.PINGTIMEOUT = 2
+
+        # Default number of failures before declaring a neighbor(s) up. 0 means we react immediately
+        self.HOLDDOWN = 0
+
+        # Default number of failures before declaring a neighbor(s) down. 0 means we react immediately
+        self.HOLDUP = 0
+
+        # Default check Interval in seconds
+        self.CHECKINTERVAL = 5
+
+        # Default Nexthop-Group Name
+        self.NHG = "PROXIES"
+        #
+
+        # CURRENTSTATUS  Values are UP, DOWN, FIRST DOWN and BACK UP. Use this as a flag for status.
+        self.CURRENTSTATUS = {}
+
+        # Global counter that we'll use between iterations
+        self.ITERATION = 0
+
+        # We need a global list that will be there between iterations. Including after a reconfiguration
+        self.DEADIPV4=[]
+        self.GOODIPV4=[]
+
+
+    def on_initialized(self):
+        self.tracer.trace0("Initialized")
+        syslog.syslog("PbrMon Initialized")
+        self.agentMgr.status_set("Status:", "Administratively Up")
+
+        #We'll pass this on to on_agent_option to process each of these.
+        self.on_agent_option("NHG_BASE", self.agentMgr.agent_option("NHG_BASE"))
+        IPv4 = self.agentMgr.agent_option("IPv4")
+        if not IPv4:
+           # No IPv4 list of IPs initially set
+           self.agentMgr.status_set("IPv4 Ping List:", "None")
         else:
-            ping_commands = base_commands
-        try:
-            p_host = call(ping_commands,stdout=PIPE,stderr=PIPE)
-        except:
-            p_host = 6
-        return(p_host)
+           # Handle the initial state
+           self.on_agent_option("IPv4", IPv4)
 
-    def _to_syslog(self,sys_msg):
-        syslog.syslog("%%myPbr-6-LOG: %s"%sys_msg)
-    
-    def _remove_status(self,rem_device):
-        #Function to remove the old status and device from list
-        if all_devices:
-            for host in all_devices:
-                dev_index = all_devices.index(host)
-                if host.device == rem_device:
-                    self.agentMgr_.status_del(host.status_msg)
-                    try:
-                        all_devices.pop(dev_index)
-                    except:
-                        self._to_syslog('error removing from list')
+        #Lets check the extra parameters and see if we should override the defaults
+        #This is mostly for the status message.
+        if self.agentMgr.agent_option("CHECKINTERVAL"):
+            self.on_agent_option("CHECKINTERVAL", self.agentMgr.agent_option("CHECKINTERVAL"))
+        else:
+            #We'll just use the default time specified by global variable
+            self.agentMgr.status_set("CHECKINTERVAL:", "%s" % self.CHECKINTERVAL)
+
+        if self.agentMgr.agent_option("PINGCOUNT"):
+            self.on_agent_option("PINGCOUNT", self.agentMgr.agent_option("PINGCOUNT"))
+        else:
+            #We'll just use the default pingcount specified by global variable
+            self.agentMgr.status_set("PINGCOUNT:", "%s" % self.PINGCOUNT)
+
+        if self.agentMgr.agent_option("HOLDDOWN"):
+            self.on_agent_option("HOLDDOWN", self.agentMgr.agent_option("HOLDDOWN"))
+        else:
+            #We'll just use the default holddown specified by global variable
+            self.agentMgr.status_set("HOLDDOWN:", "%s" % self.HOLDDOWN)
+
+        if self.agentMgr.agent_option("HOLDUP"):
+            self.on_agent_option("HOLDUP", self.agentMgr.agent_option("HOLDUP"))
+        else:
+            # We'll just use the default holdup specified by instance of variable
+            self.agentMgr.status_set("HOLDUP:", "%s" % self.HOLDUP)
+
+        if self.agentMgr.agent_option("PINGTIMEOUT"):
+            self.on_agent_option("PINGTIMEOUT", self.agentMgr.agent_option("PINGTIMEOUT"))
+        else:
+            # We'll just use the default holddown specified by instance variable
+            self.agentMgr.status_set("PINGTIMEOUT:", "%s" % self.PINGTIMEOUT)
+
+        if self.agentMgr.agent_option("NHG"):
+            self.on_agent_option("NHG", self.agentMgr.agent_option("NHG"))
+        else:
+            # We'll just use the default NHG Name specified by global variable
+            self.agentMgr.status_set("NHG:", "%s" % self.NHG)
+
+        #Some basic mandatory variable checks. We'll check this when we have a
+        #no shut on the daemon. Add some notes in comment and Readme.md to recommend
+        #a shut and no shut every time you make parameter changes...
+
+        self.agentMgr.status_set("Health Status:", "Unknown")
+
+
+        #Start our handler now.
+        self.timeout_time_is(eossdk.now())
+
+
+    def on_agent_option(self, optionName, value):
+        #options are a key/value pair
+        #Here we set the status output when user does a show agent command
+        if optionName == "IPv4":
+            if not value:
+                self.tracer.trace3("IPv4 List Deleted")
+                self.agentMgr.status_set("IPv4 Ping List:", "None")
+            else:
+                self.tracer.trace3("Adding IPv4 Address list to %s" % value)
+                self.agentMgr.status_set("IPv4 Ping List:", "%s" % value)
+
+        if optionName == "CONF_FAIL":
+            if not value:
+                self.tracer.trace3("CONF_FAIL Deleted")
+                self.agentMgr.status_set("CONF_FAIL:", "None")
+            else:
+                self.tracer.trace3("Adding CONF_FAIL %s" % value)
+                self.agentMgr.status_set("CONF_FAIL:", "%s" % value)
+        if optionName == "CONF_RECOVER":
+            if not value:
+                self.tracer.trace3("CONF_RECOVER Deleted")
+                self.agentMgr.status_set("CONF_RECOVER:", "None")
+            else:
+                self.tracer.trace3("Adding CONF_RECOVER %s" % value)
+                self.agentMgr.status_set("CONF_RECOVER:", "%s" % value)
+        if optionName == "HOLDDOWN":
+            if not value:
+                self.tracer.trace3("HOLDDOWN Deleted")
+                self.agentMgr.status_set("HOLDDOWN:", self.HOLDDOWN)
+            else:
+                self.tracer.trace3("Adding HOLDDOWN %s" % value)
+                self.agentMgr.status_set("HOLDDOWN:", "%s" % value)
+        if optionName == "HOLDUP":
+            if not value:
+                self.tracer.trace3("HOLDUP Deleted")
+                self.agentMgr.status_set("HOLDUP:", self.HOLDUP)
+            else:
+                self.tracer.trace3("Adding HOLDUP %s" % value)
+                self.agentMgr.status_set("HOLDUP:", "%s" % value)
+        if optionName == "PINGCOUNT":
+            if not value:
+                self.tracer.trace3("PINGCOUNT Deleted")
+                self.agentMgr.status_set("PINGCOUNT:", self.PINGCOUNT)
+            else:
+                self.tracer.trace3("Adding PINGCOUNT %s" % value)
+                self.agentMgr.status_set("PINGCOUNT:", "%s" % value)
+        if optionName == "PINGTIMEOUT":
+            if not value:
+                self.tracer.trace3("PINGTIMEOUT Deleted")
+                self.agentMgr.status_set("PINGTIMEOUT:", self.PINGTIMEOUT)
+            else:
+                self.tracer.trace3("Adding PINGTIMEOUT %s" % value)
+                self.agentMgr.status_set("PINGTIMEOUT:", "%s" % value)
+        if optionName == "CHECKINTERVAL":
+            if not value:
+                self.tracer.trace3("CHECKINTERVAL Deleted")
+                self.agentMgr.status_set("CHECKINTERVAL:", self.CHECKINTERVAL)
+            else:
+                self.tracer.trace3("Adding CHECKINTERVAL %s" % value)
+                self.agentMgr.status_set("CHECKINTERVAL:", "%s" % value)
+        if optionName == "VRF":
+            if not value:
+                self.tracer.trace3("VRF Deleted")
+                self.agentMgr.status_set("VRF:", "Default")
+            else:
+                self.tracer.trace3("Adding VRF %s" % value)
+                self.agentMgr.status_set("VRF:", "%s" % value)
+        if optionName == "NHG":
+            if not value:
+                self.tracer.trace3("NHG Deleted")
+                self.agentMgr.status_set("Nexthop-Group:", "PROXIES")
+            else:
+                self.tracer.trace3("Adding Nexthop-Group %s" % value)
+                self.agentMgr.status_set("Nexthop-Group:", "%s" % value)
+
+    def on_agent_enabled(self, enabled):
+        #When shutdown set status and then shutdown
+        if not enabled:
+            self.tracer.trace0("Shutting down")
+            self.agentMgr.status_del("Status:")
+            self.agentMgr.status_set("Status:", "Administratively Down")
+            self.agentMgr.agent_shutdown_complete_is(True)
+
+
+    def check_vars(self):
+        '''
+        Do some basic config checking. Return 1 if all is good. Else return
+        0 if config is missing a key parameter and send a syslog message so user
+        knows what is wrong.
+        Very basic testing here. Maybe add later some syntax testing...
+        '''
+
+        # Check IP LIST.
+        if not self.agentMgr.agent_option("IPv4"):
+            syslog.syslog("IPv4 parameter is not set. This is a mandatory parameter")
+            return 0
+
+        # Parse the IPv4 list and make sure there are no typos.
+        # Let's just ask socket.inet_aton if valid.
+        if self.agentMgr.agent_option("IPv4"):
+            # Let's split this.
+            for _eachip in self.agentMgr.agent_option("IPv4").split(','):
+                try:
+                    socket.inet_aton(_eachip)
+                except socket.error:
+                    # IP is not legal.
+                    syslog.syslog("IPv4 address %s is not valid." % str(_eachip))
+                    return 0
+
+
+        #Make sure NHG_BASE Config file mandatory parameter is set
+        if not self.agentMgr.agent_option("NHG_BASE"):
+            syslog.syslog("NHG_BASE parameter is not set. This is a mandatory parameter")
+            return 0
+
+        #If we get here, then we know our config file parameters have been setself.
+        #Now lets check to make sure the files actually exist.
+        TESTFILE=self.agentMgr.agent_option("NHG_BASE")
+        if not os.path.isfile(TESTFILE):
+            syslog.syslog("NHG_BASE %s does not exist. This is mandatory." % TESTFILE)
+            return 0
+        if os.path.getsize(TESTFILE) == 0:
+            syslog.syslog("NHG_BASE %s is blank. You need at least one command listed." % TESTFILE)
+            return 0
+
+        #Check pingtimeout settings if it was set. Can only be 0-3600
+        if self.agentMgr.agent_option("PINGTIMEOUT"):
+            if int(self.agentMgr.agent_option("PINGTIMEOUT")) > 3600:
+                syslog.syslog("PINGTIMEOUT must not exceed 3600 seconds.")
+                return 0
+
+        #Check the Source variable if it is defined..
+        if self.agentMgr.agent_option("SOURCE"):
+            # check using eAPI module. And return the IP of interface.
+            # we need to do this, because if interface is down, ping can choose
+            # another interface with unknown results.
+            if self.check_interface(self.agentMgr.agent_option("SOURCE")) == False:
+                syslog.syslog("Source Interface %s is not valid. " % self.agentMgr.agent_option("SOURCE"))
+                return 0
+
+        # If VRF option set, check to make sure it really exists.
+        if self.agentMgr.agent_option("VRF"):
+                if not self.VrfMgr.exists(self.agentMgr.agent_option("VRF")):
+                    #This means the VRF does not exist
+                    syslog.syslog("VRF %s does not exist." % self.agentMgr.agent_option("VRF"))
+                    return 0
+
+        #If we get here, then we're good!
+        #
+        return 1
+
+    def on_timeout(self):
+        '''
+         This is the function/method where we do the exciting stuff :-)
+        '''
+
+        # Create a time stamp of when we begin. Depending on the ping counts,
+        # the number of IP's to check, and the ping timeout - we may need to
+        # compensate when we start our next iteration. This will be even more
+        # pronounced if the CHECKINTERVAL is very short.
+        # This can cause our reaction time to a failed state to drift significantly.
+        startTime = eossdk.now()
+
+        # Just in case someone changes the options while daemon is running
+        # we should go ahead and check our parameters on each iteration.
+        # if its not a 1, then we fail check and will just wait till next iteration
+        # and will show this via the status.
+        if self.check_vars() == 1:
+
+            #Here we do all the fun work and testing
+
+
+            #Check state, are we UP or FAILED state?
+            #If up, lets check each of our addresses.
+            #For this particular use case, its a logical OR for our addresses.
+            #If any are up, then we mark this as good
+            #If ALL are down, then we mark as bad
+            #We also need to mark the iteration number which is important
+            # for our holddown number.
+            #
+
+            #We could just react to single failure or recovery. But this is not as versatile.
+            #What happens if remote rate limits pings so we have a false positive? This is why
+            # we need to make sure that all our hosts in our list are down before we consider
+            #this an issue.
+            #Lets test each host in list and then we will populate DEAD or GOOD global list.
+            #Then it is easier to do our logic or change it after all the checks.
+
+            IPv4 = self.agentMgr.agent_option("IPv4")
+            if IPv4:
+                EachAddress = IPv4.split(',')
+                for host in EachAddress:
+                    if host not in self.CURRENTSTATUS:
+                        self.CURRENTSTATUS[host] = "UP"
+                for host in EachAddress:
+                    pingstatus = self.pingDUT(str(host))
+                    #After ping status, lets go over all the various test cases below
+                    if pingstatus == True:
+                        #Its alive - UP
+                        #Check to see if it was in our dead list
+                        if host in self.DEADIPV4:
+                            #Notify that its back up and set status back to 1
+                            syslog.syslog('PbrMon host %s is back up' % str(host))
+                            self.DEADIPV4.remove(host)
+                            self.CURRENTSTATUS[host] = "BACK UP"
+                        if host not in self.GOODIPV4:
+                        	self.GOODIPV4.append(host)
+                    else:
+                        #Its not alive  - DOWN
+                        if host not in self.DEADIPV4:
+                            syslog.syslog('PbrMon host %s is down' % str(host))
+                            self.DEADIPV4.append(host)
+                            self.CURRENTSTATUS[host] = "FIRST DOWN"
+                        if host in self.GOODIPV4:
+                        	#need to remove it from our GOOD list.
+                            self.GOODIPV4.remove(host)
+
+            # We need to have some local variables to use for HOLDUP and HOLDDOWN because the admin
+            # might change the values from the default. So lets just check this on each iteration.
+            # But if the admin changes this in the middle of an interation check, we should make sure ITERATION
+            # is greater than or equal to the HOLDDOWN or HOLDUP values so we don't get stuck.
+
+            if self.agentMgr.agent_option("HOLDDOWN"):
+                HOLDDOWNLOCAL = self.agentMgr.agent_option("HOLDDOWN")
+            else:
+                HOLDDOWNLOCAL = self.HOLDDOWN
+            if self.agentMgr.agent_option("HOLDUP"):
+                HOLDUPLOCAL = self.agentMgr.agent_option("HOLDUP")
+            else:
+                HOLDUPLOCAL = self.HOLDUP
+
+			# Now we have all the ping state for each host. Lets do our additional logic here
+            # Current implementaion is any failed host will be removed from NHG
+            if len(self.DEADIPV4) > 0:
+            	# We have one or more failed hosts here...now we need to determine whether to update config on first failure
+                for host in self.DEADIPV4:
+                    if self.CURRENTSTATUS[host] == "FIRST DOWN":
+                    	# First failure, change config, then set status to DOWN
+                        if self.ITERATION >= int(HOLDUPLOCAL):
+                        	# Fail
+                            self.CURRENTSTATUS[host] = "DOWN"
+                            self.ITERATION = 0
+                            syslog.syslog("PbrMon changing configuration for failed host.")
+                            # RUN CONFIG Change
+                            self.change_config('FAIL', host)
+                        else:
+                        	self.ITERATION += 1
+                            # We need to wait till we hit our HOLDDOWN counter so we dampen a flapping condition if so exists
+            else:
+            	# We get here when everything is up...nothing in DEADIPV4 list
+                # Determine, are we already up? If so, noop. If not, then we need to determine if we are at HOLDDOWN.
+                for host in self.GOODIPV4:
+                    if self.CURRENTSTATUS[host] == "BACK UP":
+                    	# Determine if we need to do something
+                        if self.ITERATION >= int(HOLDDOWNLOCAL):
+                            syslog.syslog("PbrMon changing configuration for recovered host")
+                            # run config change recover
+                            self.change_config('RECOVER', host)
+                            #Set Currentstatus to 0, we're now in failed state
+                            self.CURRENTSTATUS[host] = "UP"
+                            #Reset ITERATION
+                            self.ITERATION = 0
+                        else:
+                        	self.ITERATION += 1
+
+            # Set current state via HealthStatus with agentMgr.
+            if "DOWN" in self.CURRENTSTATUS.values():
+                self.agentMgr.status_set("Health Status:", "FAIL")
+            else:
+                self.agentMgr.status_set("Health Status:", "GOOD")
+
+        else:
+            # If we failed the config check, then we land here and just skip any other processing
+            # and set Health status to INACTIVE.
+            # Once the config checks out, then we'll change it above with either GOOD or FAIL
+            # dependent on our ping checks.
+            self.agentMgr.status_set("Health Status:", "INACTIVE")
+
+        # Wait for CHECKINTERVAL - if memory serves, I think I added this is to deal with
+        # time drift especially if many of the pings timeout and PINGTIMEOUT is set to a
+        # high value. This can really make our reaction time too slow
+        # and push out a reaction significantly.
+        # If the delta between the time we started our interation to this point of
+        # execution, then we need to go through our checks again immediately.
+        # If all is good, runTime ends up being pretty close to zero for the most part.
+        runTime = eossdk.now() - startTime
+        if self.agentMgr.agent_option("CHECKINTERVAL"):
+            if runTime > int(self.agentMgr.agent_option("CHECKINTERVAL")):
+                self.timeout_time_is(eossdk.now()) # Run now if Checkinterval shorter than run time.
+            else:
+                nextRun = int(self.agentMgr.agent_option("CHECKINTERVAL")) - runTime
+                self.timeout_time_is(eossdk.now() + nextRun)
+        else:
+            if runTime > int(self.CHECKINTERVAL):
+                self.timeout_time_is(eossdk.now())
+            else:
+                nextRun = int(self.CHECKINTERVAL) - runTime
+                self.timeout_time_is(eossdk.now() + nextRun)
+
+
+    def check_interface(self,SOURCE):
+        """
+        Check the interface to see if it is a legitmate interface
+
+        """
+        # Use EapiMgr to show interfaces and we'll make sure this
+        # interface is ok to use.
+        # Should we worry about capitalizing first char?
+        try:
+            showint = self.EapiMgr.run_show_cmd("show ip interface %s" % SOURCE)
+            interfaceID = simplejson.loads(showint.responses()[0])
+            for item in interfaceID['interfaces'].keys():
+                ipaddr = interfaceID['interfaces'][item]['interfaceAddress']['primaryIp']['address']
+        except:
+            ipaddr = ''
+        if ipaddr:
+            self.SOURCEINTFADDR = ipaddr
+            return ipaddr
+        else:
+            return False
+
+    def pingDUT(self,hostname):
+        """
+        Ping a DUT(s).
+        """
+
+        # Create a list of commands for subprocess Popen
+        vrf_commands = ['sudo','ip','netns','exec']
+        commands = ['ping']
+
+        # Set our ping count parameter.
+        if self.agentMgr.agent_option("PINGCOUNT"):
+            commands.append('-c%s' % self.agentMgr.agent_option("PINGCOUNT"))
+        else:
+            commands.append('-c%s' % str(self.PINGCOUNT))
+
+        # Set our ping timeout parameter.
+        if self.agentMgr.agent_option("PINGTIMEOUT"):
+            commands.append('-W%s' % self.agentMgr.agent_option("PINGTIMEOUT"))
+        else:
+            commands.append('-W%s' % str(self.PINGTIMEOUT))
+
+        if self.SOURCEINTFADDR:
+            _intf='-I%s' % self.SOURCEINTFADDR
+            commands.append(_intf)
+        if self.VrfMgr.exists(self.agentMgr.agent_option("VRF")):
+            #EOS prepends vrf with ns- in Kernel name space.
+            kernel_vrf = 'ns-' + str(self.agentMgr.agent_option("VRF"))
+            vrf_commands.append(kernel_vrf)
+            fullping_command = vrf_commands + commands + [hostname]
+        else:
+            fullping_command = commands + [hostname]
+
+        try:
+            ping_host = sp.Popen(fullping_command,stdout=sp.PIPE,stderr=sp.PIPE)
+            output, err = ping_host.communicate()
+        except:
+            # We should not be here....
+            syslog.syslog("Error trying to execute ping")
+            syslog.syslog("Ping output: %s" % output)
+
+        if err != '':
+            # We get here in error conditions such as interface is not available
+            # e.g. interface is not in the vrf specified. We'll log it so user
+            # has a hint of what might be the issue. Otherwise, if we just return
+            # a value, it will not be clear. If the interface is down, the same error
+            # will occur.
+
+            # Let's provide a more useful error message.
+            if re.match('Cannot assign requested address', err):
+                syslog.syslog("%s. Interface is probably down." % err)
+                return False
+
+        if ping_host.returncode == 0:
+            # Ping is good
+            return True
+        else:
+            return False
 
     def change_config(self, STATUS, ENTRYIP):
         '''
@@ -204,128 +677,15 @@ class PBRMON(eossdk.AgentHandler,eossdk.TimeoutHandler):
 
         return 1
 
-    def on_agent_option(self,optionName, value):
-        #First check to see if options will override the defaults
-        if optionName.lower() == 'threshold':
-            if value:
-                self._to_syslog("Ping Threshold value changed from %s to %s"%(self.PING_THRESHOLD,value))
-                self.PING_THRESHOLD = int(value)
-            else:
-                self._to_syslog("Ping Threshold value changed from %s to 3"%(self.PING_THRESHOLD))
-                self.PING_THRESHOLD = 3
-        elif optionName.lower() == 'poll':
-            if value:
-                self._to_syslog("Polling interval value changed from %s to %s"%(self.POLL_TIME,value))
-                self.POLL_TIME = int(value)
-            else:
-                self._to_syslog("Polling interval value changed from %s to 10"%(self.POLL_TIME))
-                self.POLL_TIME = 10
-        elif optionName.lower() == 'vrf':
-            if value:
-                if 'ns-' not in value:
-                    value = 'ns-' + value
-                self._to_syslog("VRF value changed from %s to %s"%(self.vrf,value))
-                self.vrf = value
-            else:
-                self._to_syslog("VRF value changed from %s to default"%(self.vrf))
-                self.vrf = 'default'
-        elif optionName.lower() == 'nhg':
-            if value:
-                self._to_syslog("Nexthop-Group value changed from %s to %s"%(self.nhg,value))
-                self.nhg = value
-            else:
-                self._to_syslog("Nexthop-Group value changed from %s to PROXIES"%(self.nhg))
-                self.nhg = 'PROXIES'
-        elif optionName.lower() == 'source':
-            if value:
-                self._to_syslog("Source Interface value changed from %s to %s"%(self.intf,value))
-                self.intf = value
-            else:
-                self._to_syslog("Source Interface value defaulted from %s to None"%(self.intf))
-                self.intf = ''
-        #Section to evaluate devices to be monitored
-        else:
-            new_device = True
-            #Section to remove a device from monitoring
-            if not value:
-                self._to_syslog('Remove %s'%optionName)
-                self._remove_status(optionName)
-            #Section to interate through and make sure it is a new device
-            if all_devices:
-                for r1 in all_devices:
-                    if optionName == r1.device and r1.ip != '':
-                        new_device = False
-                if new_device:
-                    all_devices.append(deviceMON(optionName,value))
-                else:
-                    for host in all_devices:
-                        if host.device == optionName:
-                            host.ip = value
-            #If all_devices list is empty, add the device into the list
-            else:
-                all_devices.append(deviceMON(optionName,value))
-
-    def on_timeout(self):
-        #Time to wait until it retries to ping defined hosts
-        #Checks to make sure there are configured devices
-        if all_devices:
-            for host in all_devices:
-                #Ping the remote device
-                if host.ip:
-                    ping_result = self._ping_host(host.ip)
-                    #If host is un-reachable
-                    if ping_result == 6:
-                        self._to_syslog("Error in trying to PING %s"%host.device)
-                    elif ping_result:
-                        old_count = host.failed
-                        host.increase_failure()
-                        #If first failure, grab the current date and time
-                        if old_count == 0:
-                            host.set_failure()
-                        #Delete out the current status msg, so the show daemon output doesn't fill up
-                        if host.status_msg:
-                            self.agentMgr_.status_del(host.status_msg)
-                            host.del_msg()
-                        #Set the daemon status output to when the device has been down since ie 1st fail
-                        host.set_msg("%s has been DOWN since:"%(host.device))
-                        self.agentMgr_.status_set(host.status_msg,host.first_fail)
-                        if host.failed < self.PING_THRESHOLD:
-                            self._to_syslog('%s on %s has Failed counter %s'%(host.device,host.ip,host.failed))
-                        else:
-                            self._to_syslog('%s on %s has Failed over %s times!'%(host.device,host.ip,self.PING_THRESHOLD))
-                    #Section if host is reachable via ping
-                    else:
-                        #If it's the first success, set date and time
-                        if not host.first_success:
-                            self._to_syslog('%s on %s is UP'%(host.device,host.ip))
-                            host.set_success()
-                        #If host previously failed, set new first success time and delete old status msg
-                        if host.failed > 0:
-                            self._to_syslog('%s on %s is UP'%(host.device,host.ip))
-                            host.set_success()
-                        if host.status_msg:
-                            self.agentMgr_.status_del(host.status_msg)
-                            host.del_msg()
-                        #reset the host failed count to 0
-                        host.reset_failed()
-                        #Only set the up since status msg if it was previously failed, updates only once
-                        if not host.status_msg:
-                            host.set_msg("%s has been up since:"%(host.device))
-                            self.agentMgr_.status_set(host.status_msg,host.first_success)
-                    #Check if the total failed count is eq to the set threshold
-                    if host.failed == self.PING_THRESHOLD:
-                        #MODIFY TO SET CONFIG!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-                        if self.EMAIL:
-                            self._send_email('ALERT FROM %s: %s on %s has failed %s consecutive ping tests'%(self.hostname,host.device,host.ip,self.PING_THRESHOLD))
-                        else:
-                            self._to_syslog("Email is not configured to send alert")
-                        self._to_syslog('%s on %s has failed %s consecutive ping tests'%(host.device,host.ip,self.PING_THRESHOLD))
-        #Start the poller timeout via EOS SDK
-        self.timeout_time_is(eossdk.now() + self.POLL_TIME)
-
-
-if __name__ == '__main__':
-    syslog.openlog('myPBR-MON',0,syslog.LOG_LOCAL4)
+#=============================================
+# MAIN
+#=============================================
+def main():
+    syslog.openlog(ident="PbrMon-ALERT-AGENT",logoption=syslog.LOG_PID, facility=syslog.LOG_LOCAL4)
     sdk = eossdk.Sdk()
-    _ = PBRMON(sdk.get_agent_mgr())
+    PbrMon = PbrMonAgent(sdk, sdk.get_timeout_mgr(),sdk.get_vrf_mgr(),sdk.get_eapi_mgr())
     sdk.main_loop(sys.argv)
+    # Run the agent until terminated by a signal
+
+if __name__ == "__main__":
+    main()
