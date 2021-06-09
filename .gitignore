@@ -1,1 +1,4 @@
 .DS_Store
+*/.DS_Store
+rpmbuild/*
+!rpmbuild/SPECS/

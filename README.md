@@ -29,7 +29,7 @@ daemon PbrMon
    option HOLDDOWN value 0
    option HOLDUP value 0
    option VRF value mgmt
-   option IPv4 value 10.1.1.1,10.1.2.1
+   option IPv4 value 10.1.1.1,10.1.2.1,10.1.2.2,10.1.3.1
    option NHG value PROXIES
    option SOURCE value et1
    no shutdown

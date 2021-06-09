@@ -3,6 +3,7 @@ FROM python:3.8
 
 # Install additional utils
 RUN apt update && apt install -y sudo \
+                                 rpm \
                                  vim \
                                  git \
                                  zip \
@@ -31,6 +32,21 @@ RUN groupadd --gid $USER_GID $USERNAME \
     && echo $USERNAME ALL=\(root\) NOPASSWD:ALL > /etc/sudoers.d/$USERNAME \
     && chmod 0440 /etc/sudoers.d/$USERNAME
 
+RUN echo "builder ALL=(ALL:ALL) NOPASSWD:ALL" >> /etc/sudoers && \
+    echo "# macros"                      >  /home/builder/.rpmmacros && \
+    echo "%_topdir    /workspaces/pbrmon/rpmbuild" >> /home/builder/.rpmmacros && \
+    echo "%_sourcedir %{_topdir}/SOURCES"        >> /home/builder/.rpmmacros && \
+    echo "%_builddir  %{_topdir}/BUILD"        >> /home/builder/.rpmmacros && \
+    echo "%_specdir   %{_topdir}/SPECS"        >> /home/builder/.rpmmacros && \
+    echo "%_rpmdir    %{_topdir}/RPM"        >> /home/builder/.rpmmacros && \
+    echo "%_srcrpmdir %{_topdir}/SRPMS"        >> /home/builder/.rpmmacros && \
+    mkdir /home/builder/rpmbuild && \
+    chown -R builder /home/builder
+
 # Install Python Packages
 RUN pip install --upgrade pip
 RUN pip install Pyyaml jsonrpclib pyeapi jsonschema treelib
+
+USER builder
+
+ENV name='PbrMon'

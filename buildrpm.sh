@@ -14,9 +14,9 @@ mkdir -p rpmbuild/SOURCES
 mkdir -p rpmbuild/RPM
 tar -cvf rpmbuild/SOURCES/PbrMon-${VERSION}-${RELEASE}.tar source/*
 
-cd /workspaces/eos-html-intf/rpmbuild/SPECS
+cd /workspaces/pbrmon/rpmbuild/SPECS
 
-rpmbuild -ba ${name}.spec
+rpmbuild -ba PbrMon.spec
 
 cd /workspaces/pbrmon
 
@@ -30,6 +30,6 @@ echo $(sha1sum rpmbuild/RPM/noarch/PbrMon-${VERSION}-${RELEASE}.noarch.rpm | awk
 scp -i ~/.ssh/builder /workspaces/pbrmon/rpmbuild/RPM/noarch/PbrMon-${VERSION}-${RELEASE}.noarch.rpm builder@${DUT}:/mnt/flash/ext-eos/
 scp -i ~/.ssh/builder manifest.txt builder@${DUT}:/mnt/flash/ext-eos/
 
-ssh -i ~/.ssh/builder builder@${DUT} bash swix create /mnt/flash/ext-eos/swix/PbrMon-${VERSION}-${RELEASE}.swix /mnt/flash/ext-eos/PbrMon-${VERSION}-${RELEASE}.noarch.rpm
+ssh -i ~/.ssh/builder builder@${DUT} swix create /mnt/flash/ext-eos/swix/PbrMon-${VERSION}-${RELEASE}.swix /mnt/flash/ext-eos/PbrMon-${VERSION}-${RELEASE}.noarch.rpm
 
-scp -i ~/.ssh/builder builder@${DUT}:/mnt/flash/ext-eos/swix/PbrMon-${VERSION}-${RELEASE}.swix /workspaces/eos-html-intf/extension/
+scp -i ~/.ssh/builder builder@${DUT}:/mnt/flash/ext-eos/swix/PbrMon-${VERSION}-${RELEASE}.swix /workspaces/pbrmon/
