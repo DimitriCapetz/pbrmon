@@ -33,16 +33,17 @@
 #
 """
 This EOS SDK script will monitor ICMP reachability to configured IPs 
-If certain amount of failures occur, it will trigger an email.
+If certain amount of failures occur, it will trigger removal from a nexthop group.
 """
 
 import eossdk
+import simplejson
 import syslog
 import sys
 import time
 from subprocess import call, PIPE, Popen
 
-__author__ = 'rmartin'
+__author__ = 'rmartin, dcapetz'
 __version__ = 1.4
 
 all_devices = []
@@ -76,23 +77,25 @@ class deviceMON():
     def reset_failed(self):
         self.failed = 0
 
-class IPMON(eossdk.AgentHandler,eossdk.TimeoutHandler):
-    def __init__(self,agentMgr):
+class PBRMON(eossdk.AgentHandler,eossdk.TimeoutHandler):
+    def __init__(self,agentMgr,EapiMgr):
         eossdk.AgentHandler.__init__(self,agentMgr)
         eossdk.TimeoutHandler.__init__(self,sdk.get_timeout_mgr())
-        self.tracer = eossdk.Tracer("EosSdkIPMonitor")
+        self.tracer = eossdk.Tracer("EosSdkPbrMonitor")
         self.agentMgr_ = agentMgr
         self.tracer.trace0("Constructed")
-        self.EMAIL = ''
+        self.EapiMgr = EapiMgr
         self.PING_THRESHOLD = 3 #Default for failed ping attempts
         self.POLL_TIME = 10 #Default for timeout between pings in seconds
         self.vrf = 'default' #Default vrf if it has not been configured on the switch
+        self.nhg = 'PROXIES' #Default NHG Name
         self.intf = '' #Interface to source pings from
         self.hostname = self._get_hostname()
+
     
     def on_initialized(self): 
         self.tracer.trace0("We are initialized!")
-        self._to_syslog('IPMON Agent Initialized')
+        self._to_syslog('PBRMON Agent Initialized')
         for r1 in self.agentMgr_.agent_option_iter():
             self.opt_name = r1
             self.opt_value = self.agentMgr_.agent_option(r1)
@@ -104,14 +107,6 @@ class IPMON(eossdk.AgentHandler,eossdk.TimeoutHandler):
         dev_hostname = res_host.stdout.read()
         dev_hostname = dev_hostname.replace('\n','')
         return(dev_hostname)
-
-    def _send_email(self,msg):
-        #Function to try and send an email alert if threshold has been reached
-        email_cmds = ['email',self.EMAIL,'-s%s'%msg]
-        try:
-            call(email_cmds,stdout=PIPE,stderr=PIPE)
-        except:
-            self._to_syslog("Error sending email!")
 
     def _ping_host(self,host):
         #Function to ping the IP address to locate
@@ -132,7 +127,7 @@ class IPMON(eossdk.AgentHandler,eossdk.TimeoutHandler):
         return(p_host)
 
     def _to_syslog(self,sys_msg):
-        syslog.syslog("%%myIP-6-LOG: %s"%sys_msg)
+        syslog.syslog("%%myPbr-6-LOG: %s"%sys_msg)
     
     def _remove_status(self,rem_device):
         #Function to remove the old status and device from list
@@ -146,19 +141,72 @@ class IPMON(eossdk.AgentHandler,eossdk.TimeoutHandler):
                     except:
                         self._to_syslog('error removing from list')
 
+    def change_config(self, STATUS, ENTRYIP):
+        '''
+        Method to change configuration of switch.
+        If STATUS is FAIL, then run replace NHG Entry with valid IP via eAPI
+        If STATUS RECOVER (or else) then put ENTRYIP in original NHG Entry via eAPI
+        '''
+        BASE_NHG = self.agentMgr.agent_option("BASE_NHG")
+        # Pull current NHG Entries
+        shownhg = self.EapiMgr.run_show_cmd("show nexthop-group %s" % self.nhg)
+        nhgResp = simplejson.loads(shownhg.responses()[0])
+        nhgEntries = []
+        replaceIps = []
+        nhgConfig = ["nexthop-group " + self.nhg + " type ip"]
+        for key, value in nhgResp["nexthopGroups"][self.nhg]["destinationIps"]:
+            if value == ENTRYIP:
+                nhgEntries.append(key)
+            else:
+                replaceIps.append(value)
+        # If status is failed, replace all entries of failed host with first active entry
+        if STATUS == 'FAIL':
+            replacementIp = replaceIps[0]
+            for nhgEntry in nhgEntries:
+                nhgConfig.append("entry %s nexthop %s" % (nhgEntry,replacementIp))
+            # Now apply config changes
+            try:
+                applyconfig = self.EapiMgr.run_config_cmds([z for z in nhgConfig])
+                if(applyconfig.success()):
+                    syslog.syslog("Removed %s from Nexthop-group %s" % (ENTRYIP, self.nhg))
+                else:
+                    syslog.syslog("Unable to remove %s from Nexthop-group %s" % (ENTRYIP, self.nhg))
+                    # provide some details on what error there was with configuration
+                    syslog.syslog("%s" % applyconfig.error_message())
+            except:
+                syslog.syslog("Unable to apply config via eAPI interaction module in EOS SDK.")
+                return 0
+        else:
+            self.tracer.trace0("%s has recovered. Applying config changes." % ENTRYIP)
+            with open(BASE_NHG) as fh:
+                configfile = fh.readlines()
+            # Strip out the whitespace
+            configfile = [x.strip() for x in configfile]
+            nhgConfigReplace = ["nexthop-group " + self.nhg + " type ip"]
+            # Check to make sure user has not specified 'enable' as the first command. This will error  in config mode
+            if configfile[0] == 'enable':
+                del configfile[0]
+            for entry in configfile:
+                if ENTRYIP in entry:
+                    nhgConfigReplace.append(entry)
+            # Now apply config changes
+            try:
+                applyconfig = self.EapiMgr.run_config_cmds([z for z in nhgConfigReplace])
+                if(applyconfig.success()):
+                    syslog.syslog("Applied Configuration changes from %s" % BASE_NHG)
+                else:
+                    syslog.syslog("Unable to apply configuration changes from %s" % BASE_NHG)
+                    # provide some details on what error there was with configuration
+                    syslog.syslog("%s" % applyconfig.error_message())
+            except:
+                syslog.syslog("Unable to apply config via eAPI interaction module in EOS SDK.")
+                return 0
+
+        return 1
+
     def on_agent_option(self,optionName, value):
         #First check to see if options will override the defaults
-        if optionName.lower() == 'email':
-            if value:
-                if self.EMAIL:
-                    self._to_syslog("Email address changed from %s to %s"%(self.EMAIL,value))
-                else:
-                    self._to_syslog("Email address changed from None to %s"%(value))
-                self.EMAIL = value
-            else:
-                self._to_syslog("Email address defaulted from %s to None"%self.EMAIL)
-                self.EMAIL = ''
-        elif optionName.lower() == 'threshold':
+        if optionName.lower() == 'threshold':
             if value:
                 self._to_syslog("Ping Threshold value changed from %s to %s"%(self.PING_THRESHOLD,value))
                 self.PING_THRESHOLD = int(value)
@@ -179,8 +227,15 @@ class IPMON(eossdk.AgentHandler,eossdk.TimeoutHandler):
                 self._to_syslog("VRF value changed from %s to %s"%(self.vrf,value))
                 self.vrf = value
             else:
-                self._to_syslog("Polling interval value changed from %s to default"%(self.vrf))
+                self._to_syslog("VRF value changed from %s to default"%(self.vrf))
                 self.vrf = 'default'
+        elif optionName.lower() == 'nhg':
+            if value:
+                self._to_syslog("Nexthop-Group value changed from %s to %s"%(self.nhg,value))
+                self.nhg = value
+            else:
+                self._to_syslog("Nexthop-Group value changed from %s to PROXIES"%(self.nhg))
+                self.nhg = 'PROXIES'
         elif optionName.lower() == 'source':
             if value:
                 self._to_syslog("Source Interface value changed from %s to %s"%(self.intf,value))
@@ -259,7 +314,7 @@ class IPMON(eossdk.AgentHandler,eossdk.TimeoutHandler):
                             self.agentMgr_.status_set(host.status_msg,host.first_success)
                     #Check if the total failed count is eq to the set threshold
                     if host.failed == self.PING_THRESHOLD:
-                        #Send email to email specified:
+                        #MODIFY TO SET CONFIG!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
                         if self.EMAIL:
                             self._send_email('ALERT FROM %s: %s on %s has failed %s consecutive ping tests'%(self.hostname,host.device,host.ip,self.PING_THRESHOLD))
                         else:
@@ -270,7 +325,7 @@ class IPMON(eossdk.AgentHandler,eossdk.TimeoutHandler):
 
 
 if __name__ == '__main__':
-    syslog.openlog('myIP-MON',0,syslog.LOG_LOCAL4)
+    syslog.openlog('myPBR-MON',0,syslog.LOG_LOCAL4)
     sdk = eossdk.Sdk()
-    _ = IPMON(sdk.get_agent_mgr())
+    _ = PBRMON(sdk.get_agent_mgr())
     sdk.main_loop(sys.argv)
