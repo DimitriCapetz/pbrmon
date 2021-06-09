@@ -72,7 +72,6 @@ The NHG_BASE file is just a list of commands that define the steady-state of the
 must be FULL commands just as if you were configuration the switch from the CLI.
 
 For example the above referenced /mnt/flash/nhg.conf file could include the following commands:
-nexthop-group PROXIES type ip
 entry 0 nexthop 10.1.1.1
 entry 1 nexthop 10.1.2.1
 
@@ -246,20 +245,13 @@ class PbrMonAgent(eossdk.AgentHandler,eossdk.TimeoutHandler, eossdk.VrfHandler):
                 self.tracer.trace3("Adding IPv4 Address list to %s" % value)
                 self.agentMgr.status_set("IPv4 Ping List:", "%s" % value)
 
-        if optionName == "CONF_FAIL":
+        if optionName == "NHG_BASE":
             if not value:
-                self.tracer.trace3("CONF_FAIL Deleted")
-                self.agentMgr.status_set("CONF_FAIL:", "None")
+                self.tracer.trace3("NHG_BASE Deleted")
+                self.agentMgr.status_set("NHG_BASE:", "None")
             else:
-                self.tracer.trace3("Adding CONF_FAIL %s" % value)
-                self.agentMgr.status_set("CONF_FAIL:", "%s" % value)
-        if optionName == "CONF_RECOVER":
-            if not value:
-                self.tracer.trace3("CONF_RECOVER Deleted")
-                self.agentMgr.status_set("CONF_RECOVER:", "None")
-            else:
-                self.tracer.trace3("Adding CONF_RECOVER %s" % value)
-                self.agentMgr.status_set("CONF_RECOVER:", "%s" % value)
+                self.tracer.trace3("Adding NHG_BASE %s" % value)
+                self.agentMgr.status_set("NHG_BASE:", "%s" % value)
         if optionName == "HOLDDOWN":
             if not value:
                 self.tracer.trace3("HOLDDOWN Deleted")
@@ -620,30 +612,32 @@ class PbrMonAgent(eossdk.AgentHandler,eossdk.TimeoutHandler, eossdk.VrfHandler):
         If STATUS is FAIL, then run replace NHG Entry with valid IP via eAPI
         If STATUS RECOVER (or else) then put ENTRYIP in original NHG Entry via eAPI
         '''
-        BASE_NHG = self.agentMgr.agent_option("BASE_NHG")
+        NHG_BASE = self.agentMgr.agent_option("NHG_BASE")
         # Pull current NHG Entries
-        shownhg = self.EapiMgr.run_show_cmd("show nexthop-group %s" % self.nhg)
+        shownhg = self.EapiMgr.run_show_cmd("show nexthop-group %s" % self.NHG)
         nhgResp = simplejson.loads(shownhg.responses()[0])
         nhgEntries = []
         replaceIps = []
-        nhgConfig = ["nexthop-group " + self.nhg + " type ip"]
-        for key, value in nhgResp["nexthopGroups"][self.nhg]["destinationIps"]:
-            if value == ENTRYIP:
-                nhgEntries.append(key)
-            else:
-                replaceIps.append(value)
+        nhgStanza = "nexthop-group %s type ip" % self.NHG
+        nhgConfig = [nhgStanza]
         # If status is failed, replace all entries of failed host with first active entry
         if STATUS == 'FAIL':
+            for key, value in nhgResp["nexthopGroups"][self.NHG]["destinationIps"].iteritems():
+                if value == ENTRYIP:
+                    nhgEntries.append(key)
+                else:
+                    replaceIps.append(value)
             replacementIp = replaceIps[0]
             for nhgEntry in nhgEntries:
                 nhgConfig.append("entry %s nexthop %s" % (nhgEntry,replacementIp))
+                syslog.syslog("%s will be replaced with %s" % (ENTRYIP, replacementIp))
             # Now apply config changes
             try:
                 applyconfig = self.EapiMgr.run_config_cmds([z for z in nhgConfig])
                 if(applyconfig.success()):
-                    syslog.syslog("Removed %s from Nexthop-group %s" % (ENTRYIP, self.nhg))
+                    syslog.syslog("Removed %s from Nexthop-group %s" % (ENTRYIP, self.NHG))
                 else:
-                    syslog.syslog("Unable to remove %s from Nexthop-group %s" % (ENTRYIP, self.nhg))
+                    syslog.syslog("Unable to remove %s from Nexthop-group %s" % (ENTRYIP, self.NHG))
                     # provide some details on what error there was with configuration
                     syslog.syslog("%s" % applyconfig.error_message())
             except:
@@ -651,14 +645,11 @@ class PbrMonAgent(eossdk.AgentHandler,eossdk.TimeoutHandler, eossdk.VrfHandler):
                 return 0
         else:
             self.tracer.trace0("%s has recovered. Applying config changes." % ENTRYIP)
-            with open(BASE_NHG) as fh:
+            with open(NHG_BASE) as fh:
                 configfile = fh.readlines()
             # Strip out the whitespace
             configfile = [x.strip() for x in configfile]
-            nhgConfigReplace = ["nexthop-group " + self.nhg + " type ip"]
-            # Check to make sure user has not specified 'enable' as the first command. This will error  in config mode
-            if configfile[0] == 'enable':
-                del configfile[0]
+            nhgConfigReplace = [nhgStanza]
             for entry in configfile:
                 if ENTRYIP in entry:
                     nhgConfigReplace.append(entry)
@@ -666,9 +657,9 @@ class PbrMonAgent(eossdk.AgentHandler,eossdk.TimeoutHandler, eossdk.VrfHandler):
             try:
                 applyconfig = self.EapiMgr.run_config_cmds([z for z in nhgConfigReplace])
                 if(applyconfig.success()):
-                    syslog.syslog("Applied Configuration changes from %s" % BASE_NHG)
+                    syslog.syslog("Applied Configuration changes from %s" % NHG_BASE)
                 else:
-                    syslog.syslog("Unable to apply configuration changes from %s" % BASE_NHG)
+                    syslog.syslog("Unable to apply configuration changes from %s" % NHG_BASE)
                     # provide some details on what error there was with configuration
                     syslog.syslog("%s" % applyconfig.error_message())
             except:
