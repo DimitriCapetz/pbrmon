@@ -25,4 +25,4 @@ cp PbrMon.mp $RPM_BUILD_ROOT/usr/lib/SysdbMountProfiles/PbrMon
 %files
 %defattr(-,root,root,-)
 /usr/lib/SysdbMountProfiles/PbrMon
-%attr(0755,root,root) /usr/local/bin/PbrMon
+%attr(0775,root,root) /usr/local/bin/PbrMon
