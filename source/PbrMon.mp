@@ -1,4 +1,4 @@
-agentName:PingCheck-%sliceId
+agentName:PbrMon-%sliceId
 
 Include: EosSdk_agent.include
 Include: EosSdk_system.include
