@@ -94,6 +94,7 @@ entry 3 nexthop 10.1.3.1
 # Version 1.4.2 - 04/22/2021 - Added verbose error logging for applyconfig
 #
 # Version 1.5.0 - 06/09/2021 - Forked for use in PBR Policy Adjustment
+# Version 1.5.1 - 06/17/2021 - Added handling for all hosts going down
 #*************************************************************************************
 #
 #
@@ -114,7 +115,7 @@ import socket
 
 
 __author__ = 'Jeremy Georges, Dimitri Capetz'
-__version__ = '1.5.0'
+__version__ = '1.5.1'
 
 #***************************
 #*     CLASSES             *
@@ -457,7 +458,18 @@ class PbrMonAgent(eossdk.AgentHandler,eossdk.TimeoutHandler, eossdk.VrfHandler):
 
 			# Now we have all the ping state for each host. Lets do our additional logic here
             # Current implementaion is any failed host will be removed from NHG
-            if len(self.DEADIPV4) > 0:
+            # First check if ALL hosts are down.
+            if len(self.DEADIPV4) == len(EachAddress):
+                # Here we see all hosts are down so we need a way to leave the current config in place
+                # as there are no valid hosts to put in the Nexthop-Group
+                for host in self.DEADIPV4:
+                    if self.CURRENTSTATUS[host] == "FIRST DOWN":
+                    	# First failure, but all others are down, set status to DOWN and exit
+                        self.CURRENTSTATUS[host] = "DOWN"
+                        self.ITERATION = 0
+                        syslog.syslog("PbrMon has no remaining valid hosts to update.")
+            # Here some hosts are down but not all listed hosts        
+            elif len(self.DEADIPV4) > 0:
             	# We have one or more failed hosts here...now we need to determine whether to update config on first failure
                 for host in self.DEADIPV4:
                     if self.CURRENTSTATUS[host] == "FIRST DOWN":
@@ -483,7 +495,11 @@ class PbrMonAgent(eossdk.AgentHandler,eossdk.TimeoutHandler, eossdk.VrfHandler):
                         if self.ITERATION >= int(HOLDDOWNLOCAL):
                             syslog.syslog("PbrMon changing configuration for recovered host")
                             # run config change recover
-                            self.change_config('RECOVER', host)
+                            # If this is the first recovered host, set all NHG entries
+                            if len(self.GOODIPV4) == 1:
+                                self.change_config('SOLO', host)
+                            else:
+                                self.change_config('RECOVER', host)
                             #Set Currentstatus to UP after recovery
                             self.CURRENTSTATUS[host] = "UP"
                             #Reset ITERATION
@@ -637,6 +653,30 @@ class PbrMonAgent(eossdk.AgentHandler,eossdk.TimeoutHandler, eossdk.VrfHandler):
                     syslog.syslog("Removed %s from Nexthop-group %s" % (ENTRYIP, self.NHG))
                 else:
                     syslog.syslog("Unable to remove %s from Nexthop-group %s" % (ENTRYIP, self.NHG))
+                    # provide some details on what error there was with configuration
+                    syslog.syslog("%s" % applyconfig.error_message())
+            except:
+                syslog.syslog("Unable to apply config via eAPI interaction module in EOS SDK.")
+                return 0
+        # If status is solo, then one host has recovered after all were down. Replace all entries with 
+        # that host.
+        elif STATUS == 'SOLO':
+            self.tracer.trace0("%s has recovered. Applying config changes." % ENTRYIP)
+            with open(NHG_BASE) as fh:
+                configfile = fh.readlines()
+            # Strip out the whitespace
+            configfile = [x.strip() for x in configfile]
+            # Read number of entries so all can be replaced.
+            for x in range(len(configfile)):
+                nhgConfig.append("entry %s nexthop %s" % (x,ENTRYIP))
+                syslog.syslog("All entries will be replaced with %s" % ENTRYIP)
+            # Now apply config changes
+            try:
+                applyconfig = self.EapiMgr.run_config_cmds([z for z in nhgConfig])
+                if(applyconfig.success()):
+                    syslog.syslog("Added %s for all entries in Nexthop-group %s" % (ENTRYIP, self.NHG))
+                else:
+                    syslog.syslog("Unable to add %s from Nexthop-group %s" % (ENTRYIP, self.NHG))
                     # provide some details on what error there was with configuration
                     syslog.syslog("%s" % applyconfig.error_message())
             except:
