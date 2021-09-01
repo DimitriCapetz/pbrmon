@@ -642,22 +642,26 @@ class PbrMonAgent(eossdk.AgentHandler,eossdk.TimeoutHandler, eossdk.VrfHandler):
                     nhgEntries.append(key)
                 else:
                     replaceIps.append(value)
-            replacementIp = replaceIps[0]
-            for nhgEntry in nhgEntries:
-                nhgConfig.append("entry %s nexthop %s" % (nhgEntry,replacementIp))
-                syslog.syslog("%s will be replaced with %s" % (ENTRYIP, replacementIp))
-            # Now apply config changes
-            try:
-                applyconfig = self.EapiMgr.run_config_cmds([z for z in nhgConfig])
-                if(applyconfig.success()):
-                    syslog.syslog("Removed %s from Nexthop-group %s" % (ENTRYIP, self.NHG))
-                else:
-                    syslog.syslog("Unable to remove %s from Nexthop-group %s" % (ENTRYIP, self.NHG))
-                    # provide some details on what error there was with configuration
-                    syslog.syslog("%s" % applyconfig.error_message())
-            except:
-                syslog.syslog("Unable to apply config via eAPI interaction module in EOS SDK.")
-                return 0
+            if replaceIps:
+                replacementIp = replaceIps[0]
+                for nhgEntry in nhgEntries:
+                    nhgConfig.append("entry %s nexthop %s" % (nhgEntry,replacementIp))
+                    syslog.syslog("%s will be replaced with %s" % (ENTRYIP, replacementIp))
+                # Now apply config changes
+                try:
+                    applyconfig = self.EapiMgr.run_config_cmds([z for z in nhgConfig])
+                    if(applyconfig.success()):
+                        syslog.syslog("Removed %s from Nexthop-group %s" % (ENTRYIP, self.NHG))
+                    else:
+                        syslog.syslog("Unable to remove %s from Nexthop-group %s" % (ENTRYIP, self.NHG))
+                        # provide some details on what error there was with configuration
+                        syslog.syslog("%s" % applyconfig.error_message())
+                except:
+                    syslog.syslog("Unable to apply config via eAPI interaction module in EOS SDK.")
+                    return 0
+            else:
+                syslog.syslog("No Valid Hosts remain active. Waiting for valid host to return.")
+
         # If status is solo, then one host has recovered after all were down. Replace all entries with 
         # that host.
         elif STATUS == 'SOLO':
